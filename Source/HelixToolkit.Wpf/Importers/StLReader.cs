@@ -18,6 +18,7 @@ namespace HelixToolkit.Wpf
     using System.Windows.Media.Media3D;
     using System.Windows.Threading;
 
+
     /// <summary>
     /// Provides an importer for StereoLithography .StL files.
     /// </summary>
@@ -26,6 +27,57 @@ namespace HelixToolkit.Wpf
     /// </remarks>
     public class StLReader : ModelReader
     {
+        /// <summary>
+        /// Color mode has two incompatible schemes
+        /// </summary>
+        enum StlColorMode
+        {
+            None,
+            VisCam_SolidView,
+            MaterialiseMagics,
+        }
+
+        /// <summary>
+        /// Settings for STL-Import
+        /// </summary>
+        public class Options
+        {
+            /// <summary>
+            /// Option/Binary: Use DefaultMaterial for all polygons.
+            /// </summary>
+            /// <note>Set to 'true' for compatibility reasons.</note>
+            public static bool IgnoreColor = true;
+
+            /// <summary>
+            /// Option/Binary/MaterialiseMagics: Use DefaultMaterial instead of the file's default color.
+            /// </summary>
+            /// <note>Set to 'true' for compatibility reasons.</note>
+            public static bool IgnoreDefaultColor = true;
+
+            /// <summary>
+            /// Option/Ascii: Allow quads in addition to triangles.
+            /// </summary>
+            /// <note>4 is default for compatibility, Standard requires 3.</note>
+            public static int MaxVerticeCountForPolygon = 4;
+
+            /// <summary>
+            /// Strictness/Any: STL-Format defines that all coordinates must be positive
+            /// </summary>
+            /// <note>Regularly violated, use 'false'</note>
+            public static bool ThrowOnNegativeCoordinates = false;
+
+            /// <summary>
+            /// Strictness/Ascii: Expect 'endloop', else any token other than 'vertex' ends the facet.
+            /// </summary>
+            public static bool ThrowOnMissingEndloop = true;
+
+            /// <summary>
+            /// Strictness/Ascii: Throw on unexpected token
+            /// </summary>
+            public static bool ThrowOnUnexpectedToken = true;
+        }
+
+
         /// <summary>
         /// The regular expression used to parse normal vectors.
         /// </summary>
@@ -37,7 +89,7 @@ namespace HelixToolkit.Wpf
         private static readonly Regex VertexRegex = new Regex(@"vertex\s*(\S*)\s*(\S*)\s*(\S*)", RegexOptions.Compiled);
 
         /// <summary>
-        /// The index.
+        /// The index in Meshes and Materials while loading the STL file.
         /// </summary>
         private int index;
 
@@ -45,6 +97,11 @@ namespace HelixToolkit.Wpf
         /// The last color.
         /// </summary>
         private Color lastColor;
+
+        /// <summary>
+        /// Interpretation of binary colour information
+        /// </summary>
+        private StlColorMode colorMode = StlColorMode.None;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="StLReader" /> class.
@@ -291,6 +348,16 @@ namespace HelixToolkit.Wpf
             double y = double.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
             double z = double.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture);
 
+            if (Options.ThrowOnNegativeCoordinates)
+            {
+                if (x < 0)
+                    throw new FileFormatException("Vertex coordinate X must always be greater zero.");
+                if (y < 0)
+                    throw new FileFormatException("Vertex coordinate Y must always be greater zero.");
+                if (z < 0)
+                    throw new FileFormatException("Vertex coordinate Z must always be greater zero.");
+            }
+
             point = new Point3D(x, y, z);
             return true;
         }
@@ -324,10 +391,34 @@ namespace HelixToolkit.Wpf
                 string id, values;
                 ParseLine(line, out id, out values);
 
-                if (id == "endloop")
+                if (Options.ThrowOnMissingEndloop)
                 {
+                    if (string.IsNullOrEmpty(line))
+                    {
+                        continue;
+                    }
+                    if (id != "endloop")
+                    {
+                        throw new FileFormatException("Unexpected token: " + id);
+                    }
                     break;
                 }
+                else
+                {
+                    if (id == "endloop")
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (points.Count < 3)
+            {
+                throw new FileFormatException("Too few vertices for polygon");
+            }
+            else if (points.Count > Options.MaxVerticeCountForPolygon)
+            {
+                throw new FileFormatException("Too many vertices for polygon");
             }
 
             ReadLine(reader, "endfacet");
@@ -378,33 +469,34 @@ namespace HelixToolkit.Wpf
             float z3 = ReadFloat(reader);
             var v3 = new Point3D(x3, y3, z3);
 
-            var attrib = Convert.ToString(ReadUInt16(reader), 2).PadLeft(16, '0').ToCharArray();
-            var hasColor = attrib[0].Equals('1');
+            UInt16 attrib = ReadUInt16(reader);
+            bool hasColor = false;
+            switch (colorMode)
+            {
+                case StlColorMode.VisCam_SolidView:
+                    hasColor = (attrib >> 15) != 0;
+                    break;
+                case StlColorMode.MaterialiseMagics:
+                    hasColor = (attrib >> 15) == 0;
+                    break;
+            }
 
             if (hasColor)
             {
-                int blue = attrib[15].Equals('1') ? 1 : 0;
-                blue = attrib[14].Equals('1') ? blue + 2 : blue;
-                blue = attrib[13].Equals('1') ? blue + 4 : blue;
-                blue = attrib[12].Equals('1') ? blue + 8 : blue;
-                blue = attrib[11].Equals('1') ? blue + 16 : blue;
-                int b = blue * 8;
+                byte blue = (byte)(((attrib) & 0x1f) << 3);
+                byte green = (byte)(((attrib >> 5) & 0x1f) << 3);
+                byte red = (byte)(((attrib >> 10) & 0x1f) << 3);
 
-                int green = attrib[10].Equals('1') ? 1 : 0;
-                green = attrib[9].Equals('1') ? green + 2 : green;
-                green = attrib[8].Equals('1') ? green + 4 : green;
-                green = attrib[7].Equals('1') ? green + 8 : green;
-                green = attrib[6].Equals('1') ? green + 16 : green;
-                int g = green * 8;
-
-                int red = attrib[5].Equals('1') ? 1 : 0;
-                red = attrib[4].Equals('1') ? red + 2 : red;
-                red = attrib[3].Equals('1') ? red + 4 : red;
-                red = attrib[2].Equals('1') ? red + 8 : red;
-                red = attrib[1].Equals('1') ? red + 16 : red;
-                int r = red * 8;
-
-                var currentColor = Color.FromRgb(Convert.ToByte(r), Convert.ToByte(g), Convert.ToByte(b));
+                Color currentColor;
+                switch (colorMode)
+                {
+                    case StlColorMode.MaterialiseMagics:
+                        currentColor = Color.FromRgb(blue, green, red);
+                        break;
+                    default:
+                        currentColor = Color.FromRgb(red, green, blue);
+                        break;
+                }
 
                 if (!Color.Equals(this.lastColor, currentColor))
                 {
@@ -450,6 +542,8 @@ namespace HelixToolkit.Wpf
             this.Meshes.Add(new MeshBuilder(true, true));
             this.Materials.Add(this.DefaultMaterial);
 
+            this.colorMode = StlColorMode.None;
+
             while (!reader.EndOfStream)
             {
                 var line = reader.ReadLine();
@@ -476,6 +570,11 @@ namespace HelixToolkit.Wpf
                         this.ReadFacet(reader, values);
                         break;
                     case "endsolid":
+                        break;
+
+                    default:
+                        if (Options.ThrowOnUnexpectedToken)
+                            throw new FileFormatException("Unexpected token: " + id);
                         break;
                 }
             }
@@ -504,12 +603,45 @@ namespace HelixToolkit.Wpf
             }
 
             var reader = new BinaryReader(stream);
-            this.Header = System.Text.Encoding.ASCII.GetString(reader.ReadBytes(80)).Trim(); 
+            this.Header = System.Text.Encoding.ASCII.GetString(reader.ReadBytes(80)).Trim();
             uint numberTriangles = ReadUInt32(reader);
 
+            // 84 = 80 + sizeof(uint32)
+            // 50 = 3 * 3 * sizeof(double) + 2
             if (length - 84 != numberTriangles * 50)
             {
                 return false;
+            }
+
+            // Guess the colour format
+            if (!Options.IgnoreColor)
+            {
+                int colorTokenIndex = this.Header.IndexOf("COLOR=");
+                if (colorTokenIndex != -1)
+                {
+                    this.colorMode = StlColorMode.MaterialiseMagics;
+
+                    colorTokenIndex += 6;
+                    byte colorA = (byte)this.Header[colorTokenIndex++];
+                    byte colorR = (byte)this.Header[colorTokenIndex++];
+                    byte colorG = (byte)this.Header[colorTokenIndex++];
+                    byte colorB = (byte)this.Header[colorTokenIndex++];
+                    var defaultColor = Color.FromArgb(colorA, colorR, colorG, colorB);
+                    //TODO do something with the default colour.
+
+                    if (!Options.IgnoreDefaultColor)
+                    {
+                        this.DefaultMaterial = MaterialHelper.CreateMaterial(defaultColor);
+                    }
+                }
+                else
+                {
+                    this.colorMode = StlColorMode.VisCam_SolidView;
+                }
+            }
+            else
+            {
+                this.colorMode = StlColorMode.None;
             }
 
             this.index = 0;
