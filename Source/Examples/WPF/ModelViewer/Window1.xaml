@@ -83,7 +83,7 @@
             </TreeView>
         </DockPanel>
 
-        <helix:HelixViewport3D x:Name="view1" CameraRotationMode="Trackball" ModelUpDirection="0,1,0">
+        <helix:HelixViewport3D x:Name="view1" CameraRotationMode="Trackball" ModelUpDirection="0,0,1">
             <ModelVisual3D x:Name="root1">
                 <!--<helix:CubeVisual3D Fill="Red"/> 
                 <helix:GridLinesVisual3D/>-->

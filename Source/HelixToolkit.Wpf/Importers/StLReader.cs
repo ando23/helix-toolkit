@@ -46,7 +46,7 @@ namespace HelixToolkit.Wpf
             /// Option/Binary: Use DefaultMaterial for all polygons.
             /// </summary>
             /// <note>Set to 'true' for compatibility reasons.</note>
-            public static bool IgnoreColor = true;
+            public static bool IgnoreColor = false;
 
             /// <summary>
             /// Option/Binary/MaterialiseMagics: Use DefaultMaterial instead of the file's default color.
@@ -97,6 +97,11 @@ namespace HelixToolkit.Wpf
         /// The last color.
         /// </summary>
         private Color lastColor;
+
+        /// <summary>
+        /// The last color.
+        /// </summary>
+        private Color defaultColorFromStl;
 
         /// <summary>
         /// Interpretation of binary colour information
@@ -506,13 +511,21 @@ namespace HelixToolkit.Wpf
 
                 if (this.Materials.Count < this.index + 1)
                 {
+                    // todo: reuse existing materials
                     this.Materials.Add(MaterialHelper.CreateMaterial(currentColor));
                 }
             }
             else
             {
+                if (!Color.Equals(this.lastColor, defaultColorFromStl))
+                {
+                    this.lastColor = defaultColorFromStl;
+                    this.index++;
+                }
+
                 if (this.Materials.Count < this.index + 1)
                 {
+                    // todo: reuse existing materials
                     this.Materials.Add(this.DefaultMaterial);
                 }
             }
@@ -626,12 +639,12 @@ namespace HelixToolkit.Wpf
                     byte colorR = (byte)this.Header[colorTokenIndex++];
                     byte colorG = (byte)this.Header[colorTokenIndex++];
                     byte colorB = (byte)this.Header[colorTokenIndex++];
-                    var defaultColor = Color.FromArgb(colorA, colorR, colorG, colorB);
+                    defaultColorFromStl = Color.FromArgb(colorA, colorR, colorG, colorB);
                     //TODO do something with the default colour.
 
                     if (!Options.IgnoreDefaultColor)
                     {
-                        this.DefaultMaterial = MaterialHelper.CreateMaterial(defaultColor);
+                        this.DefaultMaterial = MaterialHelper.CreateMaterial(defaultColorFromStl);
                     }
                 }
                 else
