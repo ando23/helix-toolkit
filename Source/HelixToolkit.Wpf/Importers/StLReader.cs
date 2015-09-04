@@ -1,6 +1,6 @@
 ﻿// --------------------------------------------------------------------------------------------------------------------
 // <copyright file="StLReader.cs" company="Helix Toolkit">
-//   Copyright (c) 2014 Helix Toolkit contributors
+//   Copyright (c) 2014-2015 Helix Toolkit contributors
 // </copyright>
 // <summary>
 //   Provides an importer for StereoLithography .StL files.
@@ -27,6 +27,29 @@ namespace HelixToolkit.Wpf
     /// </remarks>
     public class StLReader : ModelReader
     {
+        #region Constants
+
+        /// <summary>
+        /// Length of the header of binary STL files.
+        /// </summary>
+        /// <remarks>
+        /// 80 Byte of text plus sizeof(uint32) (=4) for the number of triangles
+        /// </remarks>
+        private const int BINARY_HEADER_LENGTH = 80 + 4;
+
+        /// <summary>
+        /// The regular expression used to parse normal vectors.
+        /// </summary>
+        private static readonly Regex NormalRegex = new Regex(@"normal\s*(\S*)\s*(\S*)\s*(\S*)", RegexOptions.Compiled);
+
+        /// <summary>
+        /// The regular expression used to parse vertices.
+        /// </summary>
+        private static readonly Regex VertexRegex = new Regex(@"vertex\s*(\S*)\s*(\S*)\s*(\S*)", RegexOptions.Compiled);
+
+        #endregion
+        #region Enum definitions
+
         /// <summary>
         /// Color mode has two incompatible schemes
         /// </summary>
@@ -37,10 +60,60 @@ namespace HelixToolkit.Wpf
             MaterialiseMagics,
         }
 
+        #endregion
+        #region Member variables
+
+        /// <summary>
+        /// The index in Meshes and Materials while loading the STL file.
+        /// </summary>
+        private int index;
+
+        /// <summary>
+        /// Binary STL only: The least recently used color.
+        /// </summary>
+        private Color lastColor;
+
+        /// <summary>
+        /// Binary STL only: Default color
+        /// </summary>
+        private Color defaultColorFromStl;
+
+        /// <summary>
+        /// Interpretation of binary colour information
+        /// </summary>
+        private StlColorMode colorMode = StlColorMode.None;
+
+        #endregion
+        #region Properties
+
+        /// <summary>
+        /// Gets the file header.
+        /// </summary>
+        /// <value>
+        /// The header.
+        /// </value>
+        public string Header { get; private set; }
+
+        /// <summary>
+        /// Gets the materials.
+        /// </summary>
+        /// <value> The materials. </value>
+        public IList<Material> Materials { get; private set; }
+
+        /// <summary>
+        /// Gets the meshes.
+        /// </summary>
+        /// <value> The meshes. </value>
+        public IList<MeshBuilder> Meshes { get; private set; }
+
+        #endregion
+
+        #region Options
+
         /// <summary>
         /// Settings for STL-Import
         /// </summary>
-        public class Options
+        public abstract class Options
         {
             /// <summary>
             /// Option/Binary: Use DefaultMaterial for all polygons.
@@ -77,36 +150,9 @@ namespace HelixToolkit.Wpf
             public static bool ThrowOnUnexpectedToken = true;
         }
 
+        #endregion
 
-        /// <summary>
-        /// The regular expression used to parse normal vectors.
-        /// </summary>
-        private static readonly Regex NormalRegex = new Regex(@"normal\s*(\S*)\s*(\S*)\s*(\S*)", RegexOptions.Compiled);
-
-        /// <summary>
-        /// The regular expression used to parse vertices.
-        /// </summary>
-        private static readonly Regex VertexRegex = new Regex(@"vertex\s*(\S*)\s*(\S*)\s*(\S*)", RegexOptions.Compiled);
-
-        /// <summary>
-        /// The index in Meshes and Materials while loading the STL file.
-        /// </summary>
-        private int index;
-
-        /// <summary>
-        /// The last color.
-        /// </summary>
-        private Color lastColor;
-
-        /// <summary>
-        /// The last color.
-        /// </summary>
-        private Color defaultColorFromStl;
-
-        /// <summary>
-        /// Interpretation of binary colour information
-        /// </summary>
-        private StlColorMode colorMode = StlColorMode.None;
+        #region Constructor
 
         /// <summary>
         /// Initializes a new instance of the <see cref="StLReader" /> class.
@@ -119,25 +165,48 @@ namespace HelixToolkit.Wpf
             this.Materials = new List<Material>();
         }
 
-        /// <summary>
-        /// Gets the file header.
-        /// </summary>
-        /// <value>
-        /// The header.
-        /// </value>
-        public string Header { get; private set; }
+        #endregion
+
+        #region ToModel3D()
 
         /// <summary>
-        /// Gets the materials.
+        /// Builds the model.
         /// </summary>
-        /// <value> The materials. </value>
-        public IList<Material> Materials { get; private set; }
+        /// <returns>The model.</returns>
+        public Model3DGroup ToModel3D()
+        {
+            Model3DGroup modelGroup = null;
+            this.Dispatch(
+                () =>
+                {
+                    modelGroup = new Model3DGroup();
+                    int i = 0;
+                    foreach (var mesh in this.Meshes)
+                    {
+                        var gm = new GeometryModel3D
+                        {
+                            Geometry = mesh.ToMesh(),
+                            Material = this.Materials[i],
+                            BackMaterial = this.Materials[i]
+                        };
+                        if (this.Freeze)
+                        {
+                            gm.Freeze();
+                        }
 
-        /// <summary>
-        /// Gets the meshes.
-        /// </summary>
-        /// <value> The meshes. </value>
-        public IList<MeshBuilder> Meshes { get; private set; }
+                        modelGroup.Children.Add(gm);
+                        i++;
+                    }
+
+                    if (this.Freeze)
+                    {
+                        modelGroup.Freeze();
+                    }
+                });
+            return modelGroup;
+        }
+
+        #endregion
 
         /// <summary>
         /// Reads the model from the specified stream.
@@ -165,41 +234,61 @@ namespace HelixToolkit.Wpf
             return null;
         }
 
+        #region ASCII mode
+
         /// <summary>
-        /// Builds the model.
+        /// Reads the model in ASCII format from the specified stream.
         /// </summary>
-        /// <returns>The model.</returns>
-        public Model3DGroup ToModel3D()
+        /// <param name="stream">
+        /// The stream.
+        /// </param>
+        /// <returns>
+        /// True if the model was loaded successfully.
+        /// </returns>
+        private bool TryReadAscii(Stream stream)
         {
-            Model3DGroup modelGroup = null;
-            this.Dispatch(
-                () =>
+            var reader = new StreamReader(stream);
+            this.Meshes.Add(new MeshBuilder(true, true));
+            this.Materials.Add(this.DefaultMaterial);
+
+            this.colorMode = StlColorMode.None;
+
+            while (!reader.EndOfStream)
+            {
+                var line = reader.ReadLine();
+                if (line == null)
                 {
-                    modelGroup = new Model3DGroup();
-                    int i = 0;
-                    foreach (var mesh in this.Meshes)
-                    {
-                        var gm = new GeometryModel3D
-                                     {
-                                         Geometry = mesh.ToMesh(),
-                                         Material = this.Materials[i],
-                                         BackMaterial = this.Materials[i]
-                                     };
-                        if (this.Freeze)
-                        {
-                            gm.Freeze();
-                        }
+                    continue;
+                }
 
-                        modelGroup.Children.Add(gm);
-                        i++;
-                    }
+                line = line.Trim();
+                if (line.Length == 0 || line.StartsWith("\0") || line.StartsWith("#") || line.StartsWith("!")
+                    || line.StartsWith("$"))
+                {
+                    continue;
+                }
 
-                    if (this.Freeze)
-                    {
-                        modelGroup.Freeze();
-                    }
-                });
-            return modelGroup;
+                string id, values;
+                AsciiParseLine(line, out id, out values);
+                switch (id)
+                {
+                    case "solid":
+                        this.Header = values.Trim();
+                        break;
+                    case "facet":
+                        this.AsciiReadFacet(reader, values);
+                        break;
+                    case "endsolid":
+                        break;
+
+                    default:
+                        if (Options.ThrowOnUnexpectedToken)
+                            throw new FileFormatException("Unexpected token: " + id);
+                        break;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -214,7 +303,7 @@ namespace HelixToolkit.Wpf
         /// <param name="values">
         /// The values.
         /// </param>
-        private static void ParseLine(string line, out string id, out string values)
+        private static void AsciiParseLine(string line, out string id, out string values)
         {
             line = line.Trim();
             int idx = line.IndexOf(' ');
@@ -239,7 +328,7 @@ namespace HelixToolkit.Wpf
         /// <returns>
         /// The normal vector.
         /// </returns>
-        private static Vector3D ParseNormal(string input)
+        private static Vector3D AsciiParseNormal(string input)
         {
             var match = NormalRegex.Match(input);
             if (!match.Success)
@@ -255,21 +344,6 @@ namespace HelixToolkit.Wpf
         }
 
         /// <summary>
-        /// Reads a float (4 byte)
-        /// </summary>
-        /// <param name="reader">
-        /// The reader.
-        /// </param>
-        /// <returns>
-        /// The float.
-        /// </returns>
-        private static float ReadFloat(BinaryReader reader)
-        {
-            var bytes = reader.ReadBytes(4);
-            return BitConverter.ToSingle(bytes, 0);
-        }
-
-        /// <summary>
         /// Reads a line from the stream reader.
         /// </summary>
         /// <param name="reader">
@@ -281,7 +355,7 @@ namespace HelixToolkit.Wpf
         /// <exception cref="FileFormatException">
         /// The expected token ID was not matched.
         /// </exception>
-        private static void ReadLine(StreamReader reader, string token)
+        private static void AsciiReadLine(StreamReader reader, string token)
         {
             if (token == null)
             {
@@ -290,42 +364,12 @@ namespace HelixToolkit.Wpf
 
             var line = reader.ReadLine();
             string id, values;
-            ParseLine(line, out id, out values);
+            AsciiParseLine(line, out id, out values);
 
             if (!string.Equals(token, id, StringComparison.OrdinalIgnoreCase))
             {
                 throw new FileFormatException("Unexpected line.");
             }
-        }
-
-        /// <summary>
-        /// Reads a 16-bit unsigned integer.
-        /// </summary>
-        /// <param name="reader">
-        /// The reader.
-        /// </param>
-        /// <returns>
-        /// The unsigned integer.
-        /// </returns>
-        private static ushort ReadUInt16(BinaryReader reader)
-        {
-            var bytes = reader.ReadBytes(2);
-            return BitConverter.ToUInt16(bytes, 0);
-        }
-
-        /// <summary>
-        /// Reads a 32-bit unsigned integer.
-        /// </summary>
-        /// <param name="reader">
-        /// The reader.
-        /// </param>
-        /// <returns>
-        /// The unsigned integer.
-        /// </returns>
-        private static uint ReadUInt32(BinaryReader reader)
-        {
-            var bytes = reader.ReadBytes(4);
-            return BitConverter.ToUInt32(bytes, 0);
         }
 
         /// <summary>
@@ -376,13 +420,13 @@ namespace HelixToolkit.Wpf
         /// <param name="normal">
         /// The normal. 
         /// </param>
-        private void ReadFacet(StreamReader reader, string normal)
+        private void AsciiReadFacet(StreamReader reader, string normal)
         {
 #pragma warning disable 168
-            var n = ParseNormal(normal);
+            var n = AsciiParseNormal(normal);
 #pragma warning restore 168
             var points = new List<Point3D>();
-            ReadLine(reader, "outer");
+            AsciiReadLine(reader, "outer");
             while (true)
             {
                 var line = reader.ReadLine();
@@ -394,7 +438,7 @@ namespace HelixToolkit.Wpf
                 }
 
                 string id, values;
-                ParseLine(line, out id, out values);
+                AsciiParseLine(line, out id, out values);
 
                 if (Options.ThrowOnMissingEndloop)
                 {
@@ -426,7 +470,7 @@ namespace HelixToolkit.Wpf
                 throw new FileFormatException("Too many vertices for polygon");
             }
 
-            ReadLine(reader, "endfacet");
+            AsciiReadLine(reader, "endfacet");
 
             if (this.Materials.Count < this.index + 1)
             {
@@ -443,13 +487,134 @@ namespace HelixToolkit.Wpf
             // todo: add normals
         }
 
+        #endregion
+        #region BINARY mode
+
+        /// <summary>
+        /// Reads the model from the specified binary stream.
+        /// </summary>
+        /// <param name="stream">
+        /// The stream.
+        /// </param>
+        /// <returns>
+        /// True if the file was read successfully.
+        /// </returns>
+        /// <exception cref="System.IO.FileFormatException">
+        /// Incomplete file
+        /// </exception>
+        private bool TryReadBinary(Stream stream)
+        {
+            long length = stream.Length;
+            if (length < BINARY_HEADER_LENGTH)
+            {
+                throw new FileFormatException("Incomplete file");
+            }
+
+            var reader = new BinaryReader(stream);
+            this.Header = System.Text.Encoding.ASCII.GetString(reader.ReadBytes(80)).Trim();
+            uint numberTriangles = ReadUInt32(reader);
+
+            // 84 = 80 + sizeof(uint32)
+            // 50 = 3 * 3 * sizeof(double) + 2
+            if (length - BINARY_HEADER_LENGTH != numberTriangles * 50)
+            {
+                return false;
+            }
+
+            // Guess the colour format
+            if (!Options.IgnoreColor)
+            {
+                int colorTokenIndex = this.Header.IndexOf("COLOR=");
+                if (colorTokenIndex != -1)
+                {
+                    this.colorMode = StlColorMode.MaterialiseMagics;
+
+                    colorTokenIndex += 6;
+                    byte colorA = (byte)this.Header[colorTokenIndex++];
+                    byte colorR = (byte)this.Header[colorTokenIndex++];
+                    byte colorG = (byte)this.Header[colorTokenIndex++];
+                    byte colorB = (byte)this.Header[colorTokenIndex];
+
+                    if (!Options.IgnoreDefaultColor)
+                    {
+                        defaultColorFromStl = Color.FromArgb(colorA, colorR, colorG, colorB);
+                        this.DefaultMaterial = MaterialHelper.CreateMaterial(defaultColorFromStl);
+                    }
+                }
+                else
+                {
+                    this.colorMode = StlColorMode.VisCam_SolidView;
+                }
+            }
+            else
+            {
+                this.colorMode = StlColorMode.None;
+            }
+
+            this.index = 0;
+            this.Meshes.Add(new MeshBuilder(true, true));
+            this.Materials.Add(this.DefaultMaterial);
+
+            for (int i = 0; i < numberTriangles; i++)
+            {
+                this.BinaryReadTriangle(reader);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Reads a float (4 byte)
+        /// </summary>
+        /// <param name="reader">
+        /// The reader.
+        /// </param>
+        /// <returns>
+        /// The float.
+        /// </returns>
+        private static float ReadFloat(BinaryReader reader)
+        {
+            var bytes = reader.ReadBytes(4);
+            return BitConverter.ToSingle(bytes, 0);
+        }
+
+        /// <summary>
+        /// Reads a 16-bit unsigned integer.
+        /// </summary>
+        /// <param name="reader">
+        /// The reader.
+        /// </param>
+        /// <returns>
+        /// The unsigned integer.
+        /// </returns>
+        private static ushort ReadUInt16(BinaryReader reader)
+        {
+            var bytes = reader.ReadBytes(2);
+            return BitConverter.ToUInt16(bytes, 0);
+        }
+
+        /// <summary>
+        /// Reads a 32-bit unsigned integer.
+        /// </summary>
+        /// <param name="reader">
+        /// The reader.
+        /// </param>
+        /// <returns>
+        /// The unsigned integer.
+        /// </returns>
+        private static uint ReadUInt32(BinaryReader reader)
+        {
+            var bytes = reader.ReadBytes(4);
+            return BitConverter.ToUInt32(bytes, 0);
+        }
+
         /// <summary>
         /// Reads a triangle from a binary STL file.
         /// </summary>
         /// <param name="reader">
         /// The reader.
         /// </param>
-        private void ReadTriangle(BinaryReader reader)
+        private void BinaryReadTriangle(BinaryReader reader)
         {
             float ni = ReadFloat(reader);
             float nj = ReadFloat(reader);
@@ -540,133 +705,6 @@ namespace HelixToolkit.Wpf
             // todo: add normal
         }
 
-        /// <summary>
-        /// Reads the model in ASCII format from the specified stream.
-        /// </summary>
-        /// <param name="stream">
-        /// The stream.
-        /// </param>
-        /// <returns>
-        /// True if the model was loaded successfully.
-        /// </returns>
-        private bool TryReadAscii(Stream stream)
-        {
-            var reader = new StreamReader(stream);
-            this.Meshes.Add(new MeshBuilder(true, true));
-            this.Materials.Add(this.DefaultMaterial);
-
-            this.colorMode = StlColorMode.None;
-
-            while (!reader.EndOfStream)
-            {
-                var line = reader.ReadLine();
-                if (line == null)
-                {
-                    continue;
-                }
-
-                line = line.Trim();
-                if (line.Length == 0 || line.StartsWith("\0") || line.StartsWith("#") || line.StartsWith("!")
-                    || line.StartsWith("$"))
-                {
-                    continue;
-                }
-
-                string id, values;
-                ParseLine(line, out id, out values);
-                switch (id)
-                {
-                    case "solid":
-                        this.Header = values.Trim();
-                        break;
-                    case "facet":
-                        this.ReadFacet(reader, values);
-                        break;
-                    case "endsolid":
-                        break;
-
-                    default:
-                        if (Options.ThrowOnUnexpectedToken)
-                            throw new FileFormatException("Unexpected token: " + id);
-                        break;
-                }
-            }
-
-            return true;
-        }
-
-        /// <summary>
-        /// Reads the model from the specified binary stream.
-        /// </summary>
-        /// <param name="stream">
-        /// The stream.
-        /// </param>
-        /// <returns>
-        /// True if the file was read successfully.
-        /// </returns>
-        /// <exception cref="System.IO.FileFormatException">
-        /// Incomplete file
-        /// </exception>
-        private bool TryReadBinary(Stream stream)
-        {
-            long length = stream.Length;
-            if (length < 84)
-            {
-                throw new FileFormatException("Incomplete file");
-            }
-
-            var reader = new BinaryReader(stream);
-            this.Header = System.Text.Encoding.ASCII.GetString(reader.ReadBytes(80)).Trim();
-            uint numberTriangles = ReadUInt32(reader);
-
-            // 84 = 80 + sizeof(uint32)
-            // 50 = 3 * 3 * sizeof(double) + 2
-            if (length - 84 != numberTriangles * 50)
-            {
-                return false;
-            }
-
-            // Guess the colour format
-            if (!Options.IgnoreColor)
-            {
-                int colorTokenIndex = this.Header.IndexOf("COLOR=");
-                if (colorTokenIndex != -1)
-                {
-                    this.colorMode = StlColorMode.MaterialiseMagics;
-
-                    colorTokenIndex += 6;
-                    byte colorA = (byte)this.Header[colorTokenIndex++];
-                    byte colorR = (byte)this.Header[colorTokenIndex++];
-                    byte colorG = (byte)this.Header[colorTokenIndex++];
-                    byte colorB = (byte)this.Header[colorTokenIndex++];
-                    defaultColorFromStl = Color.FromArgb(colorA, colorR, colorG, colorB);
-                    //TODO do something with the default colour.
-
-                    if (!Options.IgnoreDefaultColor)
-                    {
-                        this.DefaultMaterial = MaterialHelper.CreateMaterial(defaultColorFromStl);
-                    }
-                }
-                else
-                {
-                    this.colorMode = StlColorMode.VisCam_SolidView;
-                }
-            }
-            else
-            {
-                this.colorMode = StlColorMode.None;
-            }
-
-            this.index = 0;
-            this.Meshes.Add(new MeshBuilder(true, true));
-            this.Materials.Add(this.DefaultMaterial);
-
-            for (int i = 0; i < numberTriangles; i++)
-            {
-                this.ReadTriangle(reader);
-            }
-
-            return true;
-        }
+        #endregion
     }
 }

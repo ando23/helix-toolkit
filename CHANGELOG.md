@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Gitlink build step (#123)
 - HelixViewport3D.CursorPosition (#133)
+- Support for color in binary StL files (Wpf)
 
 ### Fixed
 - ScreenGeometryBuilder (#106)
